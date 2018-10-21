@@ -1,0 +1,96 @@
+---
+title: "Name_ranking"
+output: html_document
+---
+
+Code to help pick a name for upcoming baby based on our pairwise preference rankings
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, out.width='750px', dpi=200)
+```
+
+## Load in libraries, load and clean name rankings
+
+```{r loading, message=F, warning=F, echo=F}
+library(readr)
+library(tidyverse)
+library(dplyr)
+library(BradleyTerry2)
+library(knitr)
+library(igraph)
+raw_names <- read_csv('Boy_names.csv')
+
+names(raw_names) <- make.unique(names(raw_names))
+# Get a data frame with our names and the 2 comparison names in 3 columns
+
+proc_comps <- raw_names %>% select(matches("(Katie)|(Paul)")) %>% gather("name","comp") %>%
+  separate(comp,c("better_name","worse_name"),sep=">") %>% 
+  separate(name,c("judge"),sep="[.]",extra="drop") %>%
+  filter(!is.na(better_name) & !is.na(worse_name))
+# Print size of data
+print(sprintf("%d comparisons", nrow(proc_comps)/2))
+
+# Check for stuff that wasn't in the starting list (so can go back and fix typos)
+starting_list <- unlist(raw_names %>% select(`Possible first`) %>% 
+                          filter(!is.na(`Possible first`)))
+
+print(filter(proc_comps,!(better_name %in% starting_list) | 
+               !(worse_name %in%starting_list)))
+```
+
+## Get rankings and display
+
+```{r bradley-terry, message=F, warning=F}
+scores_judges <- data.frame()
+for(curr_judge in unique(proc_comps$judge)) {
+  # Fit Bradley-Terry model for each judge to derive rankings
+  proc_comps_judge <- filter(proc_comps,judge==curr_judge)
+
+  BT_judge<-BTm(factor(rep(2,nrow(proc_comps_judge)),levels=c(1,2)),
+      factor(proc_comps_judge$better_name,levels=starting_list),
+      factor(proc_comps_judge$worse_name,levels=starting_list))
+  # Update the model to reduce bias and extract scores (note that "high" scores are
+  ##  coming out negative for some reason)
+  scores_judge <- BTabilities(update(BT_judge, br=TRUE))
+  scores_judges <- rbind(scores_judges, data.frame(scores_judge) %>%
+                                           mutate(names=row.names(scores_judge)) %>%
+                                           mutate(judge=curr_judge))
+}
+# Munge formatting and combine results from Paul and me and display
+results <- scores_judges %>% rename(score=ability) %>% mutate(score=-score) %>% 
+  mutate(rank=dense_rank(-score)) %>% gather(stat,val,c(score,s.e.,rank)) %>%
+  unite(temp,c(judge,stat)) %>% spread(temp,val) %>%
+  mutate(sum_score=Paul_score+Katie_score, Katie_rank=dense_rank(-Katie_score),
+        Paul_rank=dense_rank(-Paul_score)) %>% arrange(desc(sum_score)) 
+kable(results)
+# Get results on which we most disagree
+kable(results %>% arrange(desc(abs(Katie_rank-Paul_rank))) %>% head(10))
+```
+
+# Check if there are cycles in the graph
+
+```{r cycles, message=F, warning=F}
+non_compared <- setdiff(starting_list, union(proc_comps$better_name, proc_comps$worse_name))
+for(curr_judge in unique(proc_comps$judge)) {
+  proc_comps_judge <- filter(proc_comps,judge==curr_judge)
+  judge_graph <- graph_from_edgelist(as.matrix(select(proc_comps_judge,better_name,
+                                                      worse_name))) + vertices(non_compared)
+  plot(judge_graph,vertex.size=10,vertex.label.cex=.65,edge.arrow.size=.2,
+       edge.arrow.width=5, vertex.color="white",vertex.frame.color="gray",
+       main=curr_judge,asp=0)
+
+  # If there are cycles, find them
+  if (!is.dag(judge_graph)) {
+    print(sprintf("%s's name graph does contain cycles.", curr_judge))
+    comps <- components(judge_graph,mode="strong")
+    for (elt in which(comps$csize>1)) {
+         cycle <- subgraph(judge_graph, which(V(judge_graph)$name %in%
+                                   names(comps$membership)[which(comps$membership==elt)]))
+         plot(cycle, asp=0, vertex.size=12)
+    }
+  } else {    
+    print(sprintf("%s's name graph does not contain cycles.", curr_judge))
+  }
+}
+
+```
